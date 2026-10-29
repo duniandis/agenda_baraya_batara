@@ -681,10 +681,25 @@
       }) + ' WIB' : ''
     }
     
+    // Nomor otomatis mengikuti dokumen TERAKHIR, bukan nomor terbesar.
+    // Contoh: sesudah nomor manual 001, saran berikutnya adalah 002.
+    let nomorManual = false;
+
     function nextNumber(rows, type) {
-      const m = rows.reduce((a, d) => /^\d+$/.test(String(d.nomorBerkas)) ? Math.max(a, Number(d.nomorBerkas)) : a, 0);
-      return type === 'keluar' ? String(m + 1).padStart(3, '0') : String(m + 1)
+      const latest = rows.reduce((last, row) =>
+        !last || Number(row.timestamp || 0) > Number(last.timestamp || 0) ? row : last, null);
+      const text = String(latest?.nomorBerkas ?? '').trim();
+      const parsed = /^[+-]?\d+$/.test(text) ? Number(text) : 0;
+      const nomor = (Number.isSafeInteger(parsed) ? parsed : 0) + 1;
+      return type === 'keluar' ? String(nomor).padStart(3, '0') : String(nomor);
     }
+
+    // Hanya masukan pengguna pada kolom nomor yang mengaktifkan mode manual.
+    // Mengubah tanggal atau kolom lain tidak mengubah mode penomoran.
+    $('form').elements.nomorBerkas.oninput = () => {
+      nomorManual = true;
+    };
+
     const toStored = s => s.split('-').reverse().join('-');
     
     function toInput(s) {
@@ -777,6 +792,7 @@
     function openEditor(d = null) {
       if (!ready || busy) return;
       editId = d?.id || null;
+      nomorManual = Boolean(d);
       $('form').reset();
       $('formerror').textContent = '';
       $('formtitle').textContent = (d ? 'Edit' : 'Tambah') + ' Surat ' + (kind === 'keluar' ? 'Keluar' : 'Masuk');
@@ -806,16 +822,26 @@
       }
       payload.tanggal = toStored(payload.tanggal);
       if (kind === 'keluar' && !editId && /^\d+$/.test(payload.nomorBerkas)) payload.nomorBerkas = String(Number(payload.nomorBerkas)).padStart(3, '0');
-      const same = data.some(d => d.id !== editId && d.nomorBerkas === payload.nomorBerkas);
-      if (same) {
-        $('formerror').textContent = 'Nomor berkas ini sudah digunakan. Periksa atau ganti nomor.';
-        return
-      }
+      // Nomor manual boleh sama dengan dokumen lain, termasuk tahun sama.
+      // Setiap surat baru tetap memakai ID dokumen Firestore yang baru.
       busy = true;
       $('save').disabled = true;
       $('cancel').disabled = true;
       $('formerror').textContent = 'Menyimpan ke server…';
       try {
+        // Untuk nomor otomatis, baca ulang satu dokumen terakhir dari server.
+        // Jika nomor saran sudah dipakai selama form terbuka, lanjutkan dari
+        // nomor terbaru. Nomor yang diketik manual tidak diperiksa / diganti.
+        // Ini bukan penguncian transaksional lintas aplikasi Android dan web.
+        if (!editId && !nomorManual) {
+          const latest = await api.getDocsFromServer(api.query(
+            api.collection(db, collectionName(kind)),
+            api.orderBy('timestamp', 'desc'),
+            api.limit(1)
+          ));
+          payload.nomorBerkas = nextNumber(latest.docs.map(d => d.data()), kind);
+          $('form').elements.nomorBerkas.value = payload.nomorBerkas;
+        }
         if (editId) await api.updateDoc(api.doc(db, collectionName(kind), editId), payload);
         else await api.addDoc(api.collection(db, collectionName(kind)), {
           ...payload,
